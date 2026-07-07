@@ -1,0 +1,2 @@
+"""Flowka demo consumer."""
+

@@ -1,0 +1,203 @@
+name: flowka
+
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.3.1
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - 512M
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - INTERNAL://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - INTERNAL://redpanda:9092,OUTSIDE://localhost:19092
+    ports:
+      - "19092:19092"
+      - "9644:9644"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster info --brokers redpanda:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: flowka
+      POSTGRES_USER: flowka
+      POSTGRES_PASSWORD: flowka
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flowka -d flowka"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      FLOWKA_CLUSTER_NAME: Local Demo
+      FLOWKA_USE_DEMO_DATA: "false"
+      FLOWKA_KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      FLOWKA_DATABASE_URL: postgresql+asyncpg://flowka:flowka@postgres:5432/flowka
+      FLOWKA_CORS_ORIGINS: http://localhost:5173,http://localhost:8080,http://localhost:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  frontend:
+    build:
+      context: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+
+  demo-producer-orders:
+    build:
+      context: ./demo/producer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      FLOWKA_TOPIC: orders.created
+      FLOWKA_PRODUCER_KIND: orders
+      FLOWKA_RATE_PER_SECOND: "10"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  demo-producer-payments:
+    build:
+      context: ./demo/producer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      FLOWKA_TOPIC: payments.completed
+      FLOWKA_PRODUCER_KIND: payments
+      FLOWKA_RATE_PER_SECOND: "5"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  demo-producer-users:
+    build:
+      context: ./demo/producer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      FLOWKA_TOPIC: user.updated
+      FLOWKA_PRODUCER_KIND: users
+      FLOWKA_RATE_PER_SECOND: "3"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  demo-consumer-billing:
+    build:
+      context: ./demo/consumer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      FLOWKA_GROUP_ID: billing-service
+      FLOWKA_TOPICS: orders.created,payments.completed
+      FLOWKA_PROCESSING_DELAY_SECONDS: "0.08"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      demo-producer-orders:
+        condition: service_started
+
+  demo-consumer-analytics:
+    build:
+      context: ./demo/consumer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      FLOWKA_GROUP_ID: analytics-service
+      FLOWKA_TOPICS: orders.created,user.updated
+      FLOWKA_PROCESSING_DELAY_SECONDS: "0.03"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      demo-producer-orders:
+        condition: service_started
+
+  demo-consumer-slow:
+    build:
+      context: ./demo/consumer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      FLOWKA_GROUP_ID: slow-consumer
+      FLOWKA_TOPICS: payments.completed
+      FLOWKA_PROCESSING_DELAY_SECONDS: "1.25"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      demo-producer-payments:
+        condition: service_started
+
+  demo-producer-notifications:
+    build:
+      context: ./demo/producer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      FLOWKA_TOPIC: notification.sent
+      FLOWKA_PRODUCER_KIND: notifications
+      FLOWKA_RATE_PER_SECOND: "6"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  demo-consumer-notifications:
+    build:
+      context: ./demo/consumer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      FLOWKA_GROUP_ID: notification-service
+      FLOWKA_TOPICS: notification.sent
+      FLOWKA_PROCESSING_DELAY_SECONDS: "0.05"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      demo-producer-notifications:
+        condition: service_started
+
+  console:
+    image: redpandadata/console:v2.8.3
+    profiles: ["tools"]
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    ports:
+      - "8081:8080"
+
+volumes:
+  redpanda-data:
+  postgres-data:
+
